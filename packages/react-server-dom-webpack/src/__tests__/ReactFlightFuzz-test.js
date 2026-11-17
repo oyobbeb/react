@@ -1153,7 +1153,6 @@ describe.each(['node', 'edge', 'reply'])('ReactFlightFuzz (%s)', host => {
         }));
     }
 
-    // @gate FIXME
     it('keeps undefined object properties', () =>
       runGraph({
         nodes: {
@@ -2317,12 +2316,10 @@ describe.each(['node', 'edge', 'reply'])('ReactFlightFuzz (%s)', host => {
                     ? [
                         ...unsupportedReplyOperations,
                         // These produce cases that fail for now.
-                        'undefined',
                         'colon',
                       ]
                     : [
                         // These produce cases that fail for now.
-                        'undefined',
                         'colon',
                       ],
               }),
@@ -2607,7 +2604,6 @@ describe('ReactFlightFuzz (reply-temporary)', () => {
             without: [
               ...REPLY_TEMPORARY_WITHOUT,
               // These produce cases that fail for now.
-              'undefined',
               'colon',
             ],
             extra: REPLY_TEMPORARY_EXTRA,
