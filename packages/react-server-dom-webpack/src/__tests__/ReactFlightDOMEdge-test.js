@@ -2363,6 +2363,212 @@ describe('ReactFlightDOMEdge', () => {
     expect((await reader.read()).done).toBe(true);
   });
 
+  it('preserves a stream item while a nested iterator settles synchronously', async () => {
+    const item = {};
+    item.nested = {
+      [Symbol.asyncIterator]() {
+        let done = false;
+        return {
+          next() {
+            const result = {value: done ? undefined : item, done};
+            done = true;
+            return {then: resolve => resolve(result)};
+          },
+        };
+      },
+    };
+    item.self = item;
+    const source = new ReadableStream({
+      start(controller) {
+        controller.enqueue(item);
+        controller.close();
+      },
+    });
+    const stream = await serverAct(() =>
+      ReactServerDOMServer.renderToReadableStream(source, {}),
+    );
+    const result = await ReactServerDOMClient.createFromReadableStream(stream, {
+      serverConsumerManifest: {moduleMap: null, moduleLoading: null},
+    });
+    const reader = result.getReader();
+    const received = (await reader.read()).value;
+    expect(received.self).toBe(received);
+    const iterator = received.nested[Symbol.asyncIterator]();
+    const nested = await iterator.next();
+    expect(nested.done).toBe(false);
+    expect(nested.value.self).toBe(nested.value);
+    expect(nested.value.nested).toBe(received.nested);
+    expect(await iterator.next()).toEqual({value: undefined, done: true});
+    expect((await reader.read()).done).toBe(true);
+  });
+
+  it('refers to the outermost item across three synchronously nested iterators', async () => {
+    function syncIterable(items) {
+      return {
+        [Symbol.asyncIterator]() {
+          let i = 0;
+          return {
+            next() {
+              const result =
+                i < items.length
+                  ? {value: items[i++], done: false}
+                  : {value: undefined, done: true};
+              return {then: resolve => resolve(result)};
+            },
+          };
+        },
+      };
+    }
+    async function collect(iterable) {
+      const collected = [];
+      const iterator = iterable[Symbol.asyncIterator]();
+      let entry;
+      while (!(entry = await iterator.next()).done) {
+        collected.push(entry.value);
+      }
+      return collected;
+    }
+
+    const a = {name: 'a'};
+    const b = {name: 'b'};
+    const c = {name: 'c', top: a, mid: b};
+    a.self = a;
+    b.child = syncIterable([c]);
+    a.child = syncIterable([b]);
+
+    const stream = await serverAct(() =>
+      ReactServerDOMServer.renderToReadableStream(syncIterable([a]), {}),
+    );
+    const result = await ReactServerDOMClient.createFromReadableStream(stream, {
+      serverConsumerManifest: {moduleMap: null, moduleLoading: null},
+    });
+
+    const [receivedA] = await collect(result);
+    expect(receivedA.name).toBe('a');
+    expect(receivedA.self).toBe(receivedA);
+    const [receivedB] = await collect(receivedA.child);
+    expect(receivedB.name).toBe('b');
+    const [receivedC] = await collect(receivedB.child);
+    expect(receivedC.name).toBe('c');
+    // The innermost item refers to the object reserved by the outermost item.
+    expect(receivedC.top).toBe(receivedA);
+    expect(receivedC.mid).toBe(receivedB);
+  });
+
+  it('isolates two requests interleaved on the same cyclic objects', async () => {
+    function syncIterable(items) {
+      return {
+        [Symbol.asyncIterator]() {
+          let i = 0;
+          return {
+            next() {
+              const result =
+                i < items.length
+                  ? {value: items[i++], done: false}
+                  : {value: undefined, done: true};
+              return {then: resolve => resolve(result)};
+            },
+          };
+        },
+      };
+    }
+    async function collect(iterable) {
+      const collected = [];
+      const iterator = iterable[Symbol.asyncIterator]();
+      let entry;
+      while (!(entry = await iterator.next()).done) {
+        collected.push(entry.value);
+      }
+      return collected;
+    }
+
+    const item = {name: 'shared'};
+    item.self = item;
+    let innerStream;
+    const outerItem = {item};
+    Object.defineProperty(outerItem, 'nested', {
+      enumerable: true,
+      get() {
+        // Serialize a second request on the same objects while this item is
+        // still being written. Its bookkeeping must not disturb this request's.
+        innerStream = ReactServerDOMServer.renderToReadableStream(
+          syncIterable([item, {again: item}]),
+          {},
+        );
+        return 'started';
+      },
+    });
+    outerItem.after = item;
+
+    const outerStream = await serverAct(() =>
+      ReactServerDOMServer.renderToReadableStream(
+        syncIterable([outerItem, {again: item}]),
+        {},
+      ),
+    );
+
+    const outerResult = await ReactServerDOMClient.createFromReadableStream(
+      outerStream,
+      {serverConsumerManifest: {moduleMap: null, moduleLoading: null}},
+    );
+    const innerResult = await ReactServerDOMClient.createFromReadableStream(
+      innerStream,
+      {serverConsumerManifest: {moduleMap: null, moduleLoading: null}},
+    );
+
+    const outerItems = await collect(outerResult);
+    expect(outerItems[0].item.self).toBe(outerItems[0].item);
+    expect(outerItems[0].after).toBe(outerItems[0].item);
+    expect(outerItems[1].again).toBe(outerItems[0].item);
+
+    const innerItems = await collect(innerResult);
+    expect(innerItems[0].self).toBe(innerItems[0]);
+    expect(innerItems[1].again).toBe(innerItems[0]);
+  });
+
+  it('can pass a stream item that contains itself', async () => {
+    const item = ['first'];
+    item.push(item);
+    item.push({back: item});
+    const map = new Map();
+    map.set('self', map);
+    const inner = {};
+    inner.self = inner;
+    const s = new ReadableStream({
+      start(c) {
+        c.enqueue(item);
+        c.enqueue(map);
+        c.enqueue({inner});
+        c.enqueue({again: item});
+        c.close();
+      },
+    });
+
+    const stream = await serverAct(() =>
+      ReactServerDOMServer.renderToReadableStream(s, {}),
+    );
+
+    const result = await ReactServerDOMClient.createFromReadableStream(stream, {
+      serverConsumerManifest: {
+        moduleMap: null,
+        moduleLoading: null,
+      },
+    });
+
+    const reader = result.getReader();
+    const first = (await reader.read()).value;
+    expect(first[0]).toBe('first');
+    expect(first[1]).toBe(first);
+    expect(first[2].back).toBe(first);
+    const second = (await reader.read()).value;
+    expect(second.get('self')).toBe(second);
+    const third = (await reader.read()).value;
+    expect(third.inner.self).toBe(third.inner);
+    const fourth = (await reader.read()).value;
+    expect(fourth.again).toBe(first);
+    expect((await reader.read()).done).toBe(true);
+  });
+
   it('can pass a stream a second time after a stream item held it', async () => {
     const inner = new ReadableStream({
       start(c) {
@@ -2443,6 +2649,84 @@ describe('ReactFlightDOMEdge', () => {
     expect((await reader.read()).value).toBe('b');
     expect((await reader.read()).done).toBe(true);
     expect(errors).toEqual([]);
+  });
+
+  it('refers to an async generator that yields itself', async () => {
+    const gen = (async function* () {
+      yield gen;
+      yield 'after';
+    })();
+
+    const errors = [];
+    const stream = await serverAct(() =>
+      ReactServerDOMServer.renderToReadableStream(
+        gen,
+        {},
+        {
+          onError(x) {
+            errors.push(x.message);
+          },
+        },
+      ),
+    );
+    const result = await ReactServerDOMClient.createFromReadableStream(stream, {
+      serverConsumerManifest: {moduleMap: null, moduleLoading: null},
+    });
+
+    const iterator = result[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+    expect(first.value).toBe(result);
+    expect(await iterator.next()).toEqual({value: 'after', done: false});
+    expect((await iterator.next()).done).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  it('rejects references into a stream item that throws after they were written', async () => {
+    const X = {x: 1};
+    const it = [X, 'second'].values();
+    const item = {
+      x: X,
+      it,
+      get boom() {
+        throw new Error('boom');
+      },
+    };
+    let resolveLater;
+    const later = new Promise(r => (resolveLater = r));
+    const source = new ReadableStream({
+      start(c) {
+        c.enqueue(item);
+        c.close();
+      },
+    });
+    const errors = [];
+    const stream = await serverAct(() =>
+      ReactServerDOMServer.renderToReadableStream(
+        {stream: source, later},
+        {},
+        {
+          onError(x) {
+            errors.push(x.message);
+          },
+        },
+      ),
+    );
+    // The stream item has failed by now, but the iterator's contents were
+    // written to their own row while the item still had a reserved id, so that
+    // row holds a reference to a path under it. This value settles afterwards
+    // and reuses the iterator's row.
+    await serverAct(() => resolveLater({it}));
+    const [s1, s2] = stream.tee();
+    const result = await ReactServerDOMClient.createFromReadableStream(s1, {
+      serverConsumerManifest: {moduleMap: null, moduleLoading: null},
+    });
+    // The value that referenced the failed item rejects instead of hanging.
+    await expect(result.later).rejects.toThrow();
+    // The response finishes rather than waiting on a row that never comes.
+    await readResult(s2);
+    // The item and its stream failed with the same error. It is reported once.
+    expect(errors).toEqual(['boom']);
   });
 
   it('keeps a typed array intact when its transport also carries a byte stream', async () => {
