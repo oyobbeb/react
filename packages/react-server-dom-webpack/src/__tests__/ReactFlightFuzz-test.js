@@ -2198,15 +2198,12 @@ describe.each(['node', 'edge'])('ReactFlightFuzz (%s)', host => {
         ],
       }));
 
-    // @gate FIXME
     it('a shared stream first returned through element context with key null', () =>
       checkSharedInElementContext('stream', null));
 
-    // @gate FIXME
     it('a shared stream first returned through element context with key keyed', () =>
       checkSharedInElementContext('stream', 'keyed'));
 
-    // @gate FIXME
     it('a shared iterable first returned through element context with key null', () =>
       checkSharedInElementContext('iterable', null));
   });
