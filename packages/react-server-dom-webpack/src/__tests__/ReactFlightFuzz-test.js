@@ -2195,9 +2195,7 @@ describe.each(['node', 'edge'])('ReactFlightFuzz (%s)', host => {
       });
     }
 
-    // Node fails this in DEV until debug info reuses a value's reference.
-    // eslint-disable-next-line jest/no-disabled-tests
-    it.skip('a Promise resolves before another value containing it finishes loading', () =>
+    it('a Promise resolves before another value containing it finishes loading', () =>
       runGraph({
         nodes: {
           value: {value: null},
@@ -2244,7 +2242,6 @@ describe.each(['node', 'edge'])('ReactFlightFuzz (%s)', host => {
               ...generateGraph(seed, {
                 without: [
                   // These produce cases that fail for now.
-                  'link',
                   'undefined',
                   'colon',
                 ],
